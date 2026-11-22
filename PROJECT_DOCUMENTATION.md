@@ -39,6 +39,11 @@
    - 6.3 [Frontend Setup & Compilation](#63-frontend-setup--compilation)
    - 6.4 [Windows & Dropbox Synchronization Safeguards](#64-windows--dropbox-synchronization-safeguards)
    - 6.5 [Common Pitfalls & Diagnostic Guide](#65-common-pitfalls--diagnostic-guide)
+7. [Security Architecture, Audit & Hardening](#7-security-architecture-audit--hardening)
+   - 7.1 [Secrets, Seed Credentials & Git Hygiene](#71-secrets-seed-credentials--git-hygiene)
+   - 7.2 [Authorization, Ownership & Lifecycle Enforcement](#72-authorization-ownership--lifecycle-enforcement)
+   - 7.3 [File Uploads, Rate Limiting & Privacy Controls](#73-file-uploads-rate-limiting--privacy-controls)
+   - 7.4 [Frontend Protections & Remaining Hardening Notes](#74-frontend-protections--remaining-hardening-notes)
 
 ---
 
@@ -740,10 +745,14 @@ All endpoints are prefixed with `/api/v1`:
    # Database Connection
    DATABASE_URL=postgresql+psycopg://postgres:your_password@localhost:5432/ccbs_events
 
-   # Security & Authentication
-   JWT_SECRET=gm_university_ccbs_secret_key_super_secure_2026
+   # Security & Authentication (Generate using: python -c "import secrets; print(secrets.token_urlsafe(48))")
+   JWT_SECRET=your_generated_random_secret_here
    JWT_ALGORITHM=HS256
    ACCESS_TOKEN_EXPIRE_MINUTES=1440
+
+   # Seed credentials for initial setup (optional overrides)
+   SEED_ADMIN_PASSWORD=Admin@123
+   SEED_COORD_PASSWORD=Coord@123
 
    # AWS S3 Storage (Leave empty for automatic local filesystem fallback to backend/uploads/)
    AWS_ACCESS_KEY_ID=
@@ -765,8 +774,8 @@ All endpoints are prefixed with `/api/v1`:
    ```
 
    *Default Seed Credentials:*
-   - **HOD / Department Admin:** `admin@ccbs.edu.in` | Password: `Admin@123`
-   - **Event Coordinator:** `coord@ccbs.edu.in` | Password: `Coord@123`
+   - **HOD / Department Admin:** `admin@ccbs.edu.in` | Password: `Admin@123` (or `SEED_ADMIN_PASSWORD`)
+   - **Event Coordinator:** `coord@ccbs.edu.in` | Password: `Coord@123` (or `SEED_COORD_PASSWORD`)
 
 5. **Start FastAPI Backend Server:**
    ```powershell
@@ -842,6 +851,83 @@ Set-Content -Path "backend\venv" -Stream "com.dropbox.ignored" -Value 1
 4. **PostgreSQL Psycopg Connection String Format:**
    - *Cause:* SQLAlchemy 2.0 requires `postgresql+psycopg://` as the URL dialect string, whereas raw Psycopg scripts (`init_db.py`) expect standard `postgresql://`.
    - *Resolution:* `init_db.py` automatically normalizes the connection URL at runtime using `.replace("postgresql+psycopg://", "postgresql://")`.
+
+---
+
+## 7. Security Architecture, Audit & Hardening
+
+Following comprehensive security audits across the codebase, the CC-BS Event Management Portal incorporates multi-layered defensive controls across data storage, authorization, input validation, and HTTP security.
+
+### 7.1 Secrets, Seed Credentials & Git Hygiene
+
+- **Version Control Exclusion Rules:**
+  - Both repository root [`.gitignore`](.gitignore) and [`backend/.gitignore`](backend/.gitignore) strictly exclude sensitive files:
+    - Environment secrets: `.env`, `.env.*`, `*.env` (preserving only sanitized [`.env.example`](backend/.env.example)).
+    - Dependencies & virtual environments: `venv/`, `env/`, `node_modules/`.
+    - Build artifacts & caches: `.next/`, `out/`, `build/`, `__pycache__/`, `*.pyc`.
+    - Uploaded files: `backend/uploads/*` (preserving directory structure via `.gitkeep`).
+- **Cryptographic JWT Secret:**
+  - Active `JWT_SECRET` in `backend/.env` is generated using a high-entropy 48-byte URL-safe string (`secrets.token_urlsafe(48)`), eliminating default or guessable placeholder secrets.
+  - The public [`backend/.env.example`](backend/.env.example) template provides only safe documentation placeholders.
+- **Environment-Driven Initial Credentials:**
+  - [`backend/seed_admin.py`](backend/seed_admin.py) reads initial admin and coordinator passwords from environment variables (`SEED_ADMIN_PASSWORD` and `SEED_COORD_PASSWORD`) with clear console warnings when development fallbacks are utilized.
+
+---
+
+### 7.2 Authorization, Ownership & Lifecycle Enforcement
+
+- **Broken Object-Level Authorization (IDOR) Defenses:**
+  - **Attendance Management:** In [`backend/app/routers/conduction.py`](backend/app/routers/conduction.py), `_assert_can_manage_conduction()` asserts that only `admin` or the assigned event coordinator (`event.coordinator_id == current_user.id`) can record or alter participant check-ins.
+  - **Evaluation & Scoring:** In [`backend/app/routers/conduction.py`](backend/app/routers/conduction.py), coordinators cannot submit or tamper with scores on events assigned to other faculty members.
+  - **Rosters & Excel Export:** In [`backend/app/routers/registrations.py`](backend/app/routers/registrations.py), `list_registrations()` and `export_registrations()` verify event ownership before returning student PII (Names, USNs, Emails, Attendance).
+  - **Institutional Scope for Judges:** Users with `role == "judge"` hold institution-wide evaluation privileges across live events. The database schema does not currently enforce an `assigned_judges` junction table, allowing departmental jury workflows without brittle per-event assignment dependencies.
+- **Draft Event Privacy:**
+  - In `get_event()` ([`backend/app/routers/events.py`](backend/app/routers/events.py)), events with `status == "draft"` are hidden from students, public visitors, and other coordinators, returning `404 Not Found` unless the caller is `admin` or the event creator.
+- **Feedback Lifecycle & Attendance Gating:**
+  - In `submit_feedback()` ([`backend/app/routers/events.py`](backend/app/routers/events.py)), reviews are strictly rejected unless:
+    1. The event status is finalized as `concluded` (`event.status == "concluded"`).
+    2. The student holds a confirmed registration AND is verified as present (`attendance.is_present == True`).
+
+---
+
+### 7.3 File Uploads, Rate Limiting & Privacy Controls
+
+- **Extension, Magic-Byte & Size Validation:**
+  - Implemented in `_validate_uploaded_file()` ([`backend/app/routers/events.py`](backend/app/routers/events.py)):
+    - **PDF Circulars:** Extension restricted to `.pdf`, validated against `%PDF` magic bytes (offset 0), capped at **10 MB**.
+    - **Posters & Conduction Photos:** Extensions restricted to `.jpg`, `.jpeg`, `.png`, `.webp`, validated against binary signatures (`\xff\xd8\xff` for JPEG, `\x89PNG` for PNG, `RIFF...WEBP` for WebP), capped at **5 MB**.
+    - **Stored XSS Prevention:** Explicitly rejects `.svg`, `.html`, scripts, and executables.
+- **Bcrypt DoS Mitigation:**
+  - [`backend/app/schemas/auth.py`](backend/app/schemas/auth.py) enforces `max_length=128` on `UserRegisterRequest.password` and `UserLoginRequest.password`, preventing CPU exhaustion via oversized password payloads.
+- **Rate Limiting with SlowAPI:**
+  - Configured in [`backend/app/main.py`](backend/app/main.py) and [`backend/app/routers/auth.py`](backend/app/routers/auth.py) using an IP-based sliding window:
+    - `POST /api/v1/auth/login`: capped at **10 requests / minute**.
+    - `POST /api/v1/auth/register`: capped at **10 requests / minute**.
+- **Student Privacy & Feedback Anonymization:**
+  - `GET /api/v1/events/{event_id}/feedback` distinguishes between managers and general callers:
+    - `admin` and assigned `coordinator` receive full reviewer identities (`user_name`, `user_id`).
+    - Students and public visitors receive anonymized reviews (`user_name: "Verified Attendee"`, `user_id: None`).
+- **Public Metadata Sanitization:**
+  - In `_enrich()` ([`backend/app/routers/events.py`](backend/app/routers/events.py)), internal planning and financial fields (`budget`, `venue_permission_status`, `concluding_remarks`) are sanitized to `None` for unauthenticated visitors and non-managing students.
+
+---
+
+### 7.4 Frontend Protections & Remaining Hardening Notes
+
+- **Client-Side Route Protection:**
+  - [`frontend/src/app/coordinator/events/page.tsx`](frontend/src/app/coordinator/events/page.tsx) and [`CoordHubClient.tsx`](frontend/src/app/coordinator/events/[id]/CoordHubClient.tsx) inspect stored user roles and automatically redirect students to `/student/dashboard`.
+- **Safe URI Encoding:**
+  - All dynamic path segments in [`frontend/src/lib/api.ts`](frontend/src/lib/api.ts) (such as event IDs and verification codes) are encoded using `encodeURIComponent(...)` to prevent parameter injection.
+- **HTTP Security Headers & CSP:**
+  - Configured in [`frontend/next.config.ts`](frontend/next.config.ts) for all routes:
+    - `X-Frame-Options: DENY` (Clickjacking prevention).
+    - `X-Content-Type-Options: nosniff` (MIME-sniffing prevention).
+    - `Referrer-Policy: strict-origin-when-cross-origin`.
+    - `Permissions-Policy: camera=(), microphone=(), geolocation=()`.
+    - `Content-Security-Policy`: Scoped to `'self'`, Google Fonts, local backend API (`http://localhost:8000`), and secure data/blob image sources.
+- **Architectural & Future Hardening Roadmap:**
+  - **Token Storage Migration:** JWT tokens are currently stored in browser `localStorage`. Future architectural phases can transition authentication to `HttpOnly`, `SameSite=Strict`, `Secure` cookies.
+  - **Per-Event Judge Mapping:** If multi-departmental jury segmentation is required in future academic sessions, an `event_judges` junction table or `assigned_judge_ids` array can be introduced to bind specific judges to specific competitions.
 
 ---
 
