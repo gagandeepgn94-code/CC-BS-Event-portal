@@ -283,8 +283,8 @@ All backend endpoints are prefixed with `/api/v1`:
    ACCESS_TOKEN_EXPIRE_MINUTES=1440
 
    # Seed credentials for initial setup
-   SEED_ADMIN_PASSWORD=Admin@123
-   SEED_COORD_PASSWORD=Coord@123
+   SEED_ADMIN_PASSWORD=<set-strong-admin-password>
+   SEED_COORD_PASSWORD=<set-strong-coordinator-password>
 
    # AWS S3 Storage (leave empty for automatic local storage fallback to backend/uploads/)
    AWS_ACCESS_KEY_ID=
@@ -305,9 +305,9 @@ All backend endpoints are prefixed with `/api/v1`:
    python seed_admin.py
    ```
 
-   *Default Seed Credentials:*
-   - **HOD / Admin:** `admin@ccbs.edu.in` | Password: `Admin@123` (or `SEED_ADMIN_PASSWORD`)
-   - **Coordinator:** `coord@ccbs.edu.in` | Password: `Coord@123` (or `SEED_COORD_PASSWORD`)
+   *Initial Seed Accounts:*
+   - **HOD / Admin:** `admin@ccbs.edu.in` | Password configured via `SEED_ADMIN_PASSWORD`
+   - **Coordinator:** `coord@ccbs.edu.in` | Password configured via `SEED_COORD_PASSWORD`
 
 5. **Start the FastAPI backend server:**
    ```powershell
