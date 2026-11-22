@@ -1,0 +1,24 @@
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files
+.env
+.env.*
+*.env
+!.env.example
+
+# Uploads directory contents
+uploads/*
+!uploads/.gitkeep
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/

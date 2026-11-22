@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+alembic
+pydantic-settings
+pydantic[email]
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+boto3
+openpyxl
+qrcode[pil]
+reportlab
+bcrypt==4.0.1
+slowapi
